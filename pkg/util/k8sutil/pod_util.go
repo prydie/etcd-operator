@@ -16,12 +16,11 @@ package k8sutil
 
 import (
 	"encoding/json"
-	"fmt"
 
 	api "github.com/coreos/etcd-operator/pkg/apis/etcd/v1beta2"
-	"github.com/coreos/etcd-operator/pkg/util/etcdutil"
 
 	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 const (
@@ -68,17 +67,12 @@ func containerWithRequirements(c v1.Container, r v1.ResourceRequirements) v1.Con
 	return c
 }
 
-func newEtcdProbe(isSecure bool) *v1.Probe {
-	// etcd pod is healthy only if it can participate in consensus
-	cmd := "ETCDCTL_API=3 etcdctl endpoint health"
-	if isSecure {
-		tlsFlags := fmt.Sprintf("--cert=%[1]s/%[2]s --key=%[1]s/%[3]s --cacert=%[1]s/%[4]s", operatorEtcdTLSDir, etcdutil.CliCertFile, etcdutil.CliKeyFile, etcdutil.CliCAFile)
-		cmd = fmt.Sprintf("ETCDCTL_API=3 etcdctl --endpoints=https://localhost:%d %s endpoint health", EtcdClientPort, tlsFlags)
-	}
+func newEtcdProbe() *v1.Probe {
 	return &v1.Probe{
 		Handler: v1.Handler{
-			Exec: &v1.ExecAction{
-				Command: []string{"/bin/sh", "-ec", cmd},
+			HTTPGet: &v1.HTTPGetAction{
+				Path: "/healthz",
+				Port: intstr.FromInt(8080),
 			},
 		},
 		InitialDelaySeconds: 10,

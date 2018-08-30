@@ -295,6 +295,33 @@ func NewEtcdPodPVC(m *etcdutil.Member, pvcSpec v1.PersistentVolumeClaimSpec, clu
 	return pvc
 }
 
+// newHealthzContainer constructs a exec-healthz sidecar that exposes a healthz
+// endpoint that queries etcd via etcdctl over localhost.
+func newHealthzContainer(secure bool) v1.Container {
+	cmd := "etcdctl endpoint health"
+	if secure {
+		tlsFlags := fmt.Sprintf("--cert=%[1]s/%[2]s --key=%[1]s/%[3]s --cacert=%[1]s/%[4]s", operatorEtcdTLSDir, etcdutil.CliCertFile, etcdutil.CliKeyFile, etcdutil.CliCAFile)
+		cmd = fmt.Sprintf("etcdctl --endpoints=https://localhost:%d %s endpoint health", EtcdClientPort, tlsFlags)
+	}
+	return v1.Container{
+		// TODO(apryde): Currently queries with a -period of 2s. Too much?
+		Args: []string{"-cmd", cmd},
+		Name: "healthz",
+		// TODO(apryde): Decide how we version / rebuild this sidecar.
+		// Built using:
+		// https://github.com/kubernetes/contrib/tree/1433b0061968a1eae96507e3d9d4c91b4e570663/exec-healthz
+		// $ BASEIMAGE=gcr.io/etcd-development/etcd:v3.3.9 ARCH=amd64 REGISTRY=iad.ocir.io/spinnaker make push
+		Image: "iad.ocir.io/spinnaker/exechealthz-amd64:1433b006",
+		Ports: []v1.ContainerPort{{
+			Name:          "healthz",
+			ContainerPort: int32(8080),
+			Protocol:      v1.ProtocolTCP,
+		}},
+		Env:          []v1.EnvVar{{Name: "ETCDCTL_API", Value: "3"}},
+		VolumeMounts: []v1.VolumeMount{},
+	}
+}
+
 func newEtcdPod(m *etcdutil.Member, initialCluster []string, clusterName, state, token string, cs api.ClusterSpec) *v1.Pod {
 	commands := fmt.Sprintf("/usr/local/bin/etcd --data-dir=%s --name=%s --initial-advertise-peer-urls=%s "+
 		"--listen-peer-urls=%s --listen-client-urls=%s --advertise-client-urls=%s "+
@@ -316,8 +343,8 @@ func newEtcdPod(m *etcdutil.Member, initialCluster []string, clusterName, state,
 		"etcd_cluster": clusterName,
 	}
 
-	livenessProbe := newEtcdProbe(cs.TLS.IsSecureClient())
-	readinessProbe := newEtcdProbe(cs.TLS.IsSecureClient())
+	livenessProbe := newEtcdProbe()
+	readinessProbe := newEtcdProbe()
 	readinessProbe.InitialDelaySeconds = 1
 	readinessProbe.TimeoutSeconds = 5
 	readinessProbe.PeriodSeconds = 5
@@ -327,6 +354,7 @@ func newEtcdPod(m *etcdutil.Member, initialCluster []string, clusterName, state,
 		etcdContainer(strings.Split(commands, " "), cs.Repository, cs.Version),
 		livenessProbe,
 		readinessProbe)
+	healthzContainer := newHealthzContainer(cs.TLS.IsSecureClient())
 
 	volumes := []v1.Volume{}
 
@@ -341,6 +369,13 @@ func newEtcdPod(m *etcdutil.Member, initialCluster []string, clusterName, state,
 	}
 	if m.SecureClient {
 		container.VolumeMounts = append(container.VolumeMounts, v1.VolumeMount{
+			MountPath: serverTLSDir,
+			Name:      serverTLSVolume,
+		}, v1.VolumeMount{
+			MountPath: operatorEtcdTLSDir,
+			Name:      operatorEtcdTLSVolume,
+		})
+		healthzContainer.VolumeMounts = append(healthzContainer.VolumeMounts, v1.VolumeMount{
 			MountPath: serverTLSDir,
 			Name:      serverTLSVolume,
 		}, v1.VolumeMount{
@@ -378,7 +413,7 @@ func newEtcdPod(m *etcdutil.Member, initialCluster []string, clusterName, state,
 					TIMEOUT_READY=%d
 					while ( ! nslookup %s )
 					do
-						# If TIMEOUT_READY is 0 we should never time out and exit 
+						# If TIMEOUT_READY is 0 we should never time out and exit
 						TIMEOUT_READY=$(( TIMEOUT_READY-1 ))
                         if [ $TIMEOUT_READY -eq 0 ];
 				        then
@@ -388,7 +423,7 @@ func newEtcdPod(m *etcdutil.Member, initialCluster []string, clusterName, state,
 						sleep 1
 					done`, DNSTimeout, m.Addr())},
 			}},
-			Containers:    []v1.Container{container},
+			Containers:    []v1.Container{container, healthzContainer},
 			RestartPolicy: v1.RestartPolicyNever,
 			Volumes:       volumes,
 			// DNS A record: `[m.Name].[clusterName].Namespace.svc`
